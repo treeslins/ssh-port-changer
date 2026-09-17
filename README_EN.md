@@ -33,24 +33,18 @@ SSH Port Changer provides a guarded workflow:
 
 ---
 
-## Install
+## Quick Install
 
 ### English Edition
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port-en \
-  -o /usr/local/sbin/ssh-port
-chmod +x /usr/local/sbin/ssh-port
-ssh-port
+curl -fsSL https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port-en -o /usr/local/sbin/ssh-port && chmod +x /usr/local/sbin/ssh-port && ssh-port
 ```
 
 ### Chinese Edition
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port \
-  -o /usr/local/sbin/ssh-port
-chmod +x /usr/local/sbin/ssh-port
-ssh-port
+curl -fsSL https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port -o /usr/local/sbin/ssh-port && chmod +x /usr/local/sbin/ssh-port && ssh-port
 ```
 
 Run as `root`.
