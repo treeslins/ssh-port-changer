@@ -236,7 +236,14 @@ post_change_guide(){
 wizard_change(){ SELECTED_PORT=""; select_port || return 0; cloud_confirmation || return 0; preflight || { pause; return 0; }; final_confirmation || return 0; if change_port "$SELECTED_PORT" 1; then post_change_guide; else pause; fi; }
 show_environment(){
   local p; p="$(get_effective_port)"; echo; line; echo -e "${CYAN}${BOLD} SSH Port Changer V$SCRIPT_VERSION${NC}"; echo " SSH 安全端口配置向导"; line; echo; echo "正在检测服务器环境..."; echo
-  ok "系统：$OS_NAME"; [[ "$SSH_SERVICE" != unknown ]] && ok "SSH 服务：${SSH_SERVICE}.service" || warn "SSH 服务：未识别"; if [[ "$SSH_SOCKET" -eq 1 ]]; then info "SSH Socket：已启用"; else ok "SSH Socket：未启用"; fi; ok "当前 SSH 端口：$p"; if ssh_port_is_listening "$p"; then ok "SSH 正在正常监听"; else warn "未确认 SSH 监听"; fi; if [[ -n "${SSH_CONNECTION:-}" ]]; then ok "当前会话通过 TCP $(awk '{print $4}' <<< "$SSH_CONNECTION") 登录"; fi; if [[ "$FIREWALL" == None ]]; then info "主机防火墙：未检测到活动规则"; else info "主机防火墙：$FIREWALL"; fi; warn "云安全组：无法由本机自动确认"; echo
+  ok "系统：$OS_NAME"
+  if [[ "$SSH_SERVICE" != unknown ]]; then ok "SSH 服务：${SSH_SERVICE}.service"; else warn "SSH 服务：未识别"; fi
+  if [[ "$SSH_SOCKET" -eq 1 ]]; then info "SSH Socket：已启用"; else ok "SSH Socket：未启用"; fi
+  ok "当前 SSH 端口：$p"
+  if ssh_port_is_listening "$p"; then ok "SSH 正在正常监听"; else warn "未确认 SSH 监听"; fi
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then ok "当前会话通过 TCP $(awk '{print $4}' <<< "$SSH_CONNECTION") 登录"; fi
+  if [[ "$FIREWALL" == None ]]; then info "主机防火墙：未检测到活动规则"; else info "主机防火墙：$FIREWALL"; fi
+  warn "云安全组：无法由本机自动确认"; echo
 }
 main_menu(){
   local choice
