@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# SSH Port Changer V4.1
+# SSH Port Changer V4.2
 # https://github.com/treeslins/ssh-port-changer
 
 set -u
 set -o pipefail
 
-VERSION="4.1"
+SCRIPT_VERSION="4.2"
 STATE_DIR="/var/lib/ssh-port-changer"
 STATE_FILE="$STATE_DIR/state"
 BACKUP_ROOT="/root/ssh-port-changer-backups"
@@ -242,7 +242,7 @@ load_state(){
 status(){
   local p
   p="$(get_effective_port)"
-  echo; line; echo -e "${CYAN}SSH Port Changer V${VERSION}${NC}"; line
+  echo; line; echo -e "${CYAN}SSH Port Changer V${SCRIPT_VERSION}${NC}"; line
   echo "系统：$OS_NAME"; echo "SSH 服务：$SSH_SERVICE"; echo "SSH Socket：$([[ $SSH_SOCKET -eq 1 ]] && echo Enabled || echo Disabled)"; echo "配置端口：$p"; echo "防火墙：$FIREWALL"
   if ssh_port_is_listening "$p"; then ok "已确认 SSH 在 TCP $p 监听"; else warn "未能确认 sshd/systemd 在 TCP $p 监听"; fi
   if [[ -n "${SSH_CONNECTION:-}" ]]; then echo "当前 SSH 会话端口：$(awk '{print $4}' <<< "$SSH_CONNECTION")"; fi
@@ -285,7 +285,7 @@ change_port(){
   old="$(get_effective_port)"
   [[ "$old" == "$new" ]] && { warn "SSH 当前有效端口已经是 $new"; exit 0; }
   if port_is_listening "$new"; then err "目标端口 $new 已被占用："; port_listener "$new"; exit 1; fi
-  echo; line; echo "SSH Port Changer V$VERSION"; echo "系统：$OS_NAME"; echo "当前端口：$old"; echo "目标端口：$new"; echo "防火墙：$FIREWALL"; line
+  echo; line; echo "SSH Port Changer V$SCRIPT_VERSION"; echo "系统：$OS_NAME"; echo "当前端口：$old"; echo "目标端口：$new"; echo "防火墙：$FIREWALL"; line
   if [[ "$yes" -eq 0 ]]; then read -r -p '是否继续？[Y/n]: ' a; [[ "${a:-Y}" =~ ^[Yy]$ ]] || exit 0; fi
   backup_config; ok "配置已备份：$BACKUP_DIR"
   allow_new_port "$new"; configure_selinux "$new"; set_global_port "$new"
