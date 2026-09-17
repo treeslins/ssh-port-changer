@@ -33,24 +33,18 @@ SSH Port Changer 把这些步骤组合成一个带保护的流程：
 
 ---
 
-## 安装
+## 快速安装
 
 ### 中文版
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port \
-  -o /usr/local/sbin/ssh-port
-chmod +x /usr/local/sbin/ssh-port
-ssh-port
+curl -fsSL https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port -o /usr/local/sbin/ssh-port && chmod +x /usr/local/sbin/ssh-port && ssh-port
 ```
 
 ### English Edition
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port-en \
-  -o /usr/local/sbin/ssh-port
-chmod +x /usr/local/sbin/ssh-port
-ssh-port
+curl -fsSL https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port-en -o /usr/local/sbin/ssh-port && chmod +x /usr/local/sbin/ssh-port && ssh-port
 ```
 
 建议使用 `root` 运行。
