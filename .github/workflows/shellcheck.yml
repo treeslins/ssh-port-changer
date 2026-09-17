@@ -1,0 +1,36 @@
+name: Shell Check
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'ssh-port'
+      - '.github/workflows/shellcheck.yml'
+  pull_request:
+    paths:
+      - 'ssh-port'
+      - '.github/workflows/shellcheck.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: Bash syntax and ShellCheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Bash syntax check
+        run: bash -n ssh-port
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck
+        run: shellcheck ssh-port
