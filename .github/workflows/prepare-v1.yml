@@ -1,0 +1,28 @@
+name: Prepare v1.0.0
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/prepare-v1.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set public release version
+        run: |
+          sed -i 's/SSH Port Changer V5\.1/SSH Port Changer V1.0.0/g; s/SCRIPT_VERSION="5\.1"/SCRIPT_VERSION="1.0.0"/g' ssh-port ssh-port-en
+          sed -i 's/\*\*V5\.1\*\*/**V1.0.0**/g; s/### V5\.1 /### V1.0.0 /g; s/> V5\.1 /> V1.0.0 /g' README.md
+          sed -i 's/\*\*V5\.1\*\*/**V1.0.0**/g; s/> V5\.1 /> V1.0.0 /g' README_EN.md
+      - name: Commit version
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ssh-port ssh-port-en README.md README_EN.md
+          git commit -m 'release: set version to v1.0.0'
+          git push
