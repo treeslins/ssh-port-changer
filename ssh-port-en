@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# SSH Port Changer V5.1 - English Edition
+# https://github.com/treeslins/ssh-port-changer
+
+set -u
+set -o pipefail
+
+SCRIPT_VERSION="5.1"
+STATE_DIR="/var/lib/ssh-port-changer"
+STATE_FILE="$STATE_DIR/state"
+BACKUP_ROOT="/root/ssh-port-changer-backups"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+MANAGED_BEGIN="# BEGIN SSH PORT CHANGER"
+MANAGED_END="# END SSH PORT CHANGER"
+SOCKET_OVERRIDE="/etc/systemd/system/ssh.socket.d/90-ssh-port-changer.conf"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+info(){ echo -e "${BLUE}[INFO]${NC} $*"; }
+ok(){ echo -e "${GREEN}[ OK ]${NC} $*"; }
+warn(){ echo -e "${YELLOW}[WARN]${NC} $*"; }
+err(){ echo -e "${RED}[ERR ]${NC} $*" >&2; }
+die(){ err "$*"; exit 1; }
+line(){ printf '%s\n' '============================================================'; }
+step_line(){ printf '%s\n' '------------------------------------------------------------'; }
+pause(){ local _; read -r -p 'Press Enter to return...' _; }
+
+[[ $EUID -eq 0 ]] || die "Please run this script as root."
+[[ -f "$SSHD_CONFIG" ]] || die "Cannot find $SSHD_CONFIG"
+
+OS_NAME="Unknown Linux"
+if [[ -f /etc/os-release ]]; then
+  # shellcheck disable=SC1091
+  source /etc/os-release
+  OS_NAME="${PRETTY_NAME:-${NAME:-Unknown Linux}}"
+fi
+
+SSHD_BIN="$(command -v sshd 2>/dev/null || true)"
+[[ -z "$SSHD_BIN" && -x /usr/sbin/sshd ]] && SSHD_BIN=/usr/sbin/sshd
+[[ -n "$SSHD_BIN" ]] || die "sshd was not found. Please install OpenSSH Server first."
+
+SSH_SERVICE="unknown"; SSH_SOCKET=0
+systemd_unit_loaded(){ [[ "$(systemctl show -p LoadState --value "$1" 2>/dev/null || true)" == "loaded" ]]; }
+detect_ssh_service(){
+  SSH_SERVICE="unknown"; SSH_SOCKET=0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  if systemd_unit_loaded ssh.service; then SSH_SERVICE=ssh
+  elif systemd_unit_loaded sshd.service; then SSH_SERVICE=sshd; fi
+  if systemctl is-active --quiet ssh.socket 2>/dev/null; then SSH_SOCKET=1; fi
+}
+detect_ssh_service
+
+get_effective_port(){ local p; p="$("$SSHD_BIN" -T 2>/dev/null | awk '$1=="port"{print $2;exit}')"; printf '%s\n' "${p:-22}"; }
+port_listener(){ local p="$1"; if command -v ss >/dev/null 2>&1; then ss -lntp 2>/dev/null | grep -E "[:.]${p}[[:space:]]" || true; elif command -v netstat >/dev/null 2>&1; then netstat -lntp 2>/dev/null | grep -E "[:.]${p}[[:space:]]" || true; fi; }
+port_is_listening(){ [[ -n "$(port_listener "$1")" ]]; }
+ssh_port_is_listening(){ local p="$1" out; out="$(port_listener "$p")"; [[ -n "$out" ]] || return 1; if [[ "$SSH_SOCKET" -eq 1 ]]; then grep -Eq '(sshd|systemd)' <<< "$out"; else grep -q 'sshd' <<< "$out"; fi; }
+
+check_listenaddress(){ local found=""; found="$(grep -RhsEi '^[[:space:]]*ListenAddress[[:space:]]+(\[[^]]+\]:[0-9]+|[^[:space:]:]+:[0-9]+)' "$SSHD_CONFIG" /etc/ssh/sshd_config.d 2>/dev/null || true)"; if [[ -n "$found" ]]; then warn "ListenAddress with an explicit port was detected:"; printf '%s\n' "$found"; die "To avoid changing a custom listening topology, this version will not modify this configuration automatically."; fi; }
+
+FIREWALL="None"; FW_ZONES=""
+detect_firewall(){
+  FIREWALL="None"; FW_ZONES=""
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then FIREWALL=UFW; return; fi
+  if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then FIREWALL=firewalld; FW_ZONES="$(firewall-cmd --get-active-zones 2>/dev/null | awk 'NF && $1 !~ /^[[:space:]]/{print $1}' | paste -sd, -)"; [[ -z "$FW_ZONES" ]] && FW_ZONES="$(firewall-cmd --get-default-zone 2>/dev/null)"; return; fi
+  if command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -q 'hook input'; then FIREWALL=nftables; return; fi
+  if command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | grep -Eq '(^-P INPUT (DROP|REJECT)| -j (DROP|REJECT)( |$))'; then FIREWALL=iptables; fi
+}
+detect_firewall
+firewall_label(){ [[ "$FIREWALL" == None ]] && echo "Not detected" || echo "$FIREWALL"; }
+
+persist_iptables(){ if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent save >/dev/null 2>&1 && return 0; fi; if [[ -d /etc/iptables ]] && command -v iptables-save >/dev/null 2>&1; then iptables-save > /etc/iptables/rules.v4 && return 0; fi; warn "The iptables rule is active, but no reliable persistence mechanism was detected."; }
+FW_NEW_ADDED=0
+allow_new_port(){ local p="$1" z; FW_NEW_ADDED=0; case "$FIREWALL" in UFW) if ! ufw status 2>/dev/null | grep -Eq "^${p}/tcp[[:space:]]+ALLOW"; then ufw allow "${p}/tcp" || die "Failed to allow the port in UFW"; FW_NEW_ADDED=1; fi;; firewalld) IFS=',' read -ra zones <<< "$FW_ZONES"; for z in "${zones[@]}"; do [[ -z "$z" ]] && continue; if ! firewall-cmd --zone="$z" --query-port="${p}/tcp" >/dev/null 2>&1; then firewall-cmd --zone="$z" --add-port="${p}/tcp" --permanent >/dev/null || die "Failed to allow the port in firewalld zone: $z"; FW_NEW_ADDED=1; fi; done; firewall-cmd --reload >/dev/null || die "firewalld reload failed";; nftables) nft list ruleset 2>/dev/null | grep -Eq "tcp dport[[:space:]]+${p}([[:space:]]|$).*accept" || die "Custom nftables filtering detected. Allow TCP ${p} manually, then retry.";; iptables) if ! iptables -C INPUT -p tcp --dport "$p" -j ACCEPT >/dev/null 2>&1; then iptables -I INPUT 1 -p tcp --dport "$p" -j ACCEPT || die "Failed to add the iptables rule"; FW_NEW_ADDED=1; persist_iptables; fi;; *) warn "No active supported host firewall was detected. Also verify your cloud security group or upstream firewall.";; esac; }
+
+SELINUX_ADDED=0
+configure_selinux(){ local p="$1" mode; SELINUX_ADDED=0; command -v getenforce >/dev/null 2>&1 || return 0; mode="$(getenforce 2>/dev/null || true)"; [[ "$mode" == Enforcing || "$mode" == Permissive ]] || return 0; command -v semanage >/dev/null 2>&1 || die "SELinux is enabled but semanage is missing. Install policycoreutils-python-utils first."; if semanage port -l 2>/dev/null | awk '$1=="ssh_port_t"{for(i=3;i<=NF;i++)print $i}' | tr ',' '\n' | grep -qx "$p"; then return 0; fi; if semanage port -a -t ssh_port_t -p tcp "$p" 2>/dev/null; then SELINUX_ADDED=1; elif semanage port -m -t ssh_port_t -p tcp "$p" 2>/dev/null; then SELINUX_ADDED=1; else die "Failed to configure SELinux ssh_port_t"; fi; }
+
+backup_config(){ BACKUP_DIR="${BACKUP_ROOT}/$(date +%Y%m%d-%H%M%S)"; mkdir -p "$BACKUP_DIR"; cp -a "$SSHD_CONFIG" "$BACKUP_DIR/sshd_config"; if [[ -f "$SOCKET_OVERRIDE" ]]; then cp -a "$SOCKET_OVERRIDE" "$BACKUP_DIR/ssh-port-changer.socket.conf"; : > "$BACKUP_DIR/socket-override-existed"; fi; }
+restore_backup(){ local b="$1"; [[ -f "$b/sshd_config" ]] || die "Invalid backup: $b"; cp -a "$b/sshd_config" "$SSHD_CONFIG"; if [[ -f "$b/socket-override-existed" ]]; then mkdir -p "$(dirname "$SOCKET_OVERRIDE")"; cp -a "$b/ssh-port-changer.socket.conf" "$SOCKET_OVERRIDE"; else rm -f "$SOCKET_OVERRIDE"; fi; if command -v systemctl >/dev/null 2>&1; then systemctl daemon-reload >/dev/null 2>&1 || true; fi; "$SSHD_BIN" -t || die "The restored SSH configuration is invalid. Keep the current session open and inspect it manually."; restart_ssh || die "Configuration was restored, but restarting SSH failed."; }
+restart_ssh(){ if [[ "$SSH_SOCKET" -eq 1 ]] && command -v systemctl >/dev/null 2>&1; then systemctl restart ssh.socket || return 1; if [[ "$SSH_SERVICE" != unknown ]]; then systemctl try-restart "$SSH_SERVICE" >/dev/null 2>&1 || true; fi; elif [[ "$SSH_SERVICE" != unknown ]] && command -v systemctl >/dev/null 2>&1; then systemctl restart "$SSH_SERVICE" || return 1; elif command -v service >/dev/null 2>&1; then service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || return 1; else return 1; fi; }
+set_global_port(){ local p="$1" tmp; tmp="$(mktemp)"; awk -v port="$p" -v begin="$MANAGED_BEGIN" -v end="$MANAGED_END" 'BEGIN{inmanaged=0; done=0; matchseen=0} $0==begin {inmanaged=1; next} $0==end {inmanaged=0; next} inmanaged {next} /^[[:space:]]*Match[[:space:]]/ && !matchseen {if(!done){print begin; print "Port " port; print end; done=1} matchseen=1} !matchseen && /^[[:space:]]*Port[[:space:]]+[0-9]+([[:space:]]*(#.*)?)?$/ {print "# " $0 " # disabled by SSH Port Changer"; next} {print} END{if(!done){print ""; print begin; print "Port " port; print end}}' "$SSHD_CONFIG" > "$tmp" || { rm -f "$tmp"; die "Failed to generate SSH configuration"; }; cat "$tmp" > "$SSHD_CONFIG"; rm -f "$tmp"; if [[ "$SSH_SOCKET" -eq 1 ]]; then mkdir -p "$(dirname "$SOCKET_OVERRIDE")"; printf '[Socket]\nListenStream=\nListenStream=%s\n' "$p" > "$SOCKET_OVERRIDE"; systemctl daemon-reload || die "systemd daemon-reload failed"; fi; }
+
+save_state(){ mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; printf 'OLD_PORT=%s\nNEW_PORT=%s\nFIREWALL=%s\nFW_ZONES=%s\nFW_NEW_ADDED=%s\nSELINUX_ADDED=%s\nBACKUP_DIR=%s\nCHANGE_TIME=%s\n' "$1" "$2" "$FIREWALL" "$FW_ZONES" "$FW_NEW_ADDED" "$SELINUX_ADDED" "$BACKUP_DIR" "$(date --iso-8601=seconds 2>/dev/null || date)" > "$STATE_FILE"; chmod 600 "$STATE_FILE"; }
+load_state(){ [[ -f "$STATE_FILE" ]] || die "No previous change record was found"; OLD_PORT=""; NEW_PORT=""; SAVED_FIREWALL=""; SAVED_ZONES=""; SAVED_FW_ADDED=0; SAVED_SELINUX_ADDED=0; BACKUP_DIR=""; CHANGE_TIME=""; while IFS='=' read -r k v; do case "$k" in OLD_PORT) OLD_PORT="$v";; NEW_PORT) NEW_PORT="$v";; FIREWALL) SAVED_FIREWALL="$v";; FW_ZONES) SAVED_ZONES="$v";; FW_NEW_ADDED) SAVED_FW_ADDED="$v";; SELINUX_ADDED) SAVED_SELINUX_ADDED="$v";; BACKUP_DIR) BACKUP_DIR="$v";; CHANGE_TIME) CHANGE_TIME="$v";; esac; done < "$STATE_FILE"; [[ "$OLD_PORT" =~ ^[0-9]+$ && "$NEW_PORT" =~ ^[0-9]+$ && "$BACKUP_DIR" == "$BACKUP_ROOT/"* ]] || die "The state file is invalid. Refusing to continue."; }
+
+status(){ local p; p="$(get_effective_port)"; echo; line; echo -e "${CYAN}SSH Port Changer V${SCRIPT_VERSION}${NC}"; line; echo "System: $OS_NAME"; echo "SSH service: $SSH_SERVICE"; echo "SSH Socket: $([[ $SSH_SOCKET -eq 1 ]] && echo Enabled || echo Disabled)"; echo "Configured port: $p"; echo "Firewall: $(firewall_label)"; if ssh_port_is_listening "$p"; then ok "SSH is listening on TCP $p"; else warn "Could not confirm sshd/systemd listening on TCP $p"; fi; if [[ -n "${SSH_CONNECTION:-}" ]]; then echo "Current SSH session port: $(awk '{print $4}' <<< "$SSH_CONNECTION")"; fi; if [[ -f "$STATE_FILE" ]]; then load_state; echo "Last change: $OLD_PORT -> $NEW_PORT"; echo "Change time: $CHANGE_TIME"; echo "Backup: $BACKUP_DIR"; echo "Firewall at change: $SAVED_FIREWALL"; [[ -n "$SAVED_ZONES" ]] && echo "firewalld zones: $SAVED_ZONES"; echo "Firewall rules added: $SAVED_FW_ADDED"; echo "SELinux port mappings added: $SAVED_SELINUX_ADDED"; fi; echo; }
+cleanup(){ load_state; ssh_port_is_listening "$NEW_PORT" || die "The new SSH port ${NEW_PORT} is not confirmed listening. Refusing cleanup."; [[ "$(get_effective_port)" == "$NEW_PORT" ]] || die "The effective SSH port does not match the saved state."; local cp=""; if [[ -n "${SSH_CONNECTION:-}" ]]; then cp="$(awk '{print $4}' <<< "$SSH_CONNECTION")"; fi; if [[ "$cp" == "$OLD_PORT" ]]; then warn "This session is still using the old port. Test the new port first."; fi; warn "This tool cannot prove that an old firewall rule was created by it, so it will not delete old rules automatically."; echo "After confirming the new port is stable, manually remove any unneeded TCP ${OLD_PORT} allow rule according to your firewall policy."; }
+rollback(){ load_state; echo "Restore backup: $BACKUP_DIR ($OLD_PORT -> $NEW_PORT)"; read -r -p 'Restore the previous SSH configuration? [y/N]: ' a; [[ "$a" =~ ^[Yy]$ ]] || return 0; restore_backup "$BACKUP_DIR"; ok "SSH configuration restored."; warn "Firewall and SELinux rules for the new port are intentionally left in place to reduce lockout risk."; }
+
+change_port(){ local new="$1" yes="$2" old; [[ "$new" =~ ^[0-9]+$ ]] || die "Port must be numeric"; ((new>=1 && new<=65535)) || die "Port must be between 1 and 65535"; "$SSHD_BIN" -t || die "The current sshd configuration is invalid. Fix it first."; check_listenaddress; old="$(get_effective_port)"; [[ "$old" == "$new" ]] && { warn "SSH is already using port $new"; return 0; }; if port_is_listening "$new"; then err "Target port $new is already in use:"; port_listener "$new"; return 1; fi; echo; line; echo "SSH Port Changer V$SCRIPT_VERSION"; echo "System: $OS_NAME"; echo "Current port: $old"; echo "Target port: $new"; echo "Firewall: $(firewall_label)"; line; if [[ "$yes" -eq 0 ]]; then read -r -p 'Continue? [Y/n]: ' a; [[ "${a:-Y}" =~ ^[Yy]$ ]] || return 0; fi; backup_config; ok "Configuration backed up: $BACKUP_DIR"; allow_new_port "$new"; configure_selinux "$new"; set_global_port "$new"; if ! "$SSHD_BIN" -t; then err "New configuration failed sshd -t. Restoring automatically."; restore_backup "$BACKUP_DIR"; return 1; fi; if [[ "$(get_effective_port)" != "$new" ]]; then err "sshd -T does not report port $new. Restoring automatically."; restore_backup "$BACKUP_DIR"; return 1; fi; if ! restart_ssh; then err "SSH restart failed. Restoring automatically."; restore_backup "$BACKUP_DIR"; return 1; fi; sleep 2; if ! ssh_port_is_listening "$new"; then err "SSH was not confirmed listening on the new port. Restoring automatically."; restore_backup "$BACKUP_DIR"; return 1; fi; save_state "$old" "$new"; echo; ok "SSH port changed: $old -> $new"; warn "Do not close this SSH session. Open another terminal and test: ssh -p $new root@SERVER_IP"; warn "On cloud servers, also verify that TCP $new is allowed by the security group/cloud firewall."; }
+
+random_port(){ local p i current; current="$(get_effective_port)"; for ((i=0;i<50;i++)); do if command -v shuf >/dev/null 2>&1; then p="$(shuf -i 20000-60000 -n 1)"; else p=$((20000 + RANDOM * 40001 / 32768)); fi; if [[ "$p" != "$current" ]] && ! port_is_listening "$p"; then printf '%s\n' "$p"; return 0; fi; done; return 1; }
+select_port(){ local choice p current; current="$(get_effective_port)"; while true; do step_line; echo -e "${BOLD}Step 1/5: Choose a new SSH port${NC}"; step_line; echo "Current SSH port: $current"; echo; echo "  1) Generate a safe random port   [Recommended]"; echo "  2) Enter a port manually"; echo "  3) Return to main menu"; echo; read -r -p 'Choose [default 1]: ' choice; choice="${choice:-1}"; case "$choice" in 1) p="$(random_port)" || { warn "Unable to generate an available port right now."; continue; }; while true; do echo; echo "Recommended port: $p"; echo; ok "Port is within the valid range"; ok "TCP $p is currently unused"; ok "It does not conflict with current SSH port $current"; echo; echo "  1) Use $p                       [Recommended]"; echo "  2) Generate another port"; echo "  3) Enter manually"; echo "  4) Back"; echo; read -r -p 'Choose [default 1]: ' choice; choice="${choice:-1}"; case "$choice" in 1) SELECTED_PORT="$p"; return 0;; 2) p="$(random_port)" || continue;; 3) read -r -p 'Enter new port: ' p; if [[ "$p" =~ ^[0-9]+$ ]] && ((p>=1 && p<=65535)) && [[ "$p" != "$current" ]] && ! port_is_listening "$p"; then SELECTED_PORT="$p"; return 0; else warn "Invalid, current, or occupied port."; fi;; 4) break;; *) warn "Invalid choice.";; esac; done;; 2) read -r -p 'Enter new port: ' p; if [[ "$p" =~ ^[0-9]+$ ]] && ((p>=1 && p<=65535)) && [[ "$p" != "$current" ]] && ! port_is_listening "$p"; then SELECTED_PORT="$p"; return 0; else warn "Invalid, current, or occupied port."; fi;; 3) return 1;; *) warn "Invalid choice.";; esac; done; }
+
+CLOUD_CONFIRMATION="Not confirmed"
+cloud_confirmation(){ local choice; while true; do step_line; echo -e "${BOLD}Step 2/5: Firewall and cloud ingress check${NC}"; step_line; echo "Target port: $SELECTED_PORT"; echo; echo "Host firewall"; if [[ "$FIREWALL" == None ]]; then info "No active supported host firewall detected"; else ok "$FIREWALL detected; TCP $SELECTED_PORT will be allowed before changing SSH"; fi; echo; echo "Cloud/upstream firewall"; warn "This cannot be verified reliably from inside the server"; echo "If this is a cloud server, make sure inbound TCP $SELECTED_PORT is allowed first."; echo; echo "  1) New port is allowed; continue"; echo "  2) Not confirmed yet; pause         [Default]"; echo "  3) No cloud/upstream rule is needed"; echo "  4) Detect host firewall again"; echo "  5) Back to previous step"; echo "  6) Return to main menu"; echo; read -r -p 'Choose [default 2]: ' choice; choice="${choice:-2}"; case "$choice" in 1) CLOUD_CONFIRMATION="Confirmed TCP $SELECTED_PORT allowed"; return 0;; 2) echo; warn "Safety check is incomplete. No SSH configuration has been changed."; echo; echo "  1) Return to this step              [Recommended]"; echo "  2) Choose another port"; echo "  3) Return to main menu"; echo "  4) Exit"; echo; read -r -p 'Choose [default 1]: ' choice; choice="${choice:-1}"; case "$choice" in 1) continue;; 2) return 2;; 3) return 1;; 4) return 3;; *) warn "Invalid choice.";; esac;; 3) CLOUD_CONFIRMATION="User confirmed no upstream rule is required"; return 0;; 4) detect_firewall;; 5) return 2;; 6) return 1;; *) warn "Invalid choice.";; esac; done; }
+
+preflight(){ step_line; echo -e "${BOLD}Step 3/5: Pre-change safety checks${NC}"; step_line; "$SSHD_BIN" -t || { err "Current SSH configuration validation failed."; return 1; }; ok "sshd -t validation passed"; check_listenaddress; if port_is_listening "$SELECTED_PORT"; then err "Target port $SELECTED_PORT is already in use."; return 1; fi; ok "Target port $SELECTED_PORT is available"; if ssh_port_is_listening "$(get_effective_port)"; then ok "Current SSH listener is healthy"; else warn "Could not confirm the current SSH listener."; fi; return 0; }
+
+FINAL_ACTION="menu"
+final_confirmation(){ local choice selinux="Disabled/Not detected" socket="Disabled"; if command -v getenforce >/dev/null 2>&1; then selinux="$(getenforce 2>/dev/null || echo Unknown)"; fi; [[ "$SSH_SOCKET" -eq 1 ]] && socket="Enabled"; while true; do step_line; echo -e "${BOLD}Step 4/5: Final confirmation${NC}"; step_line; echo; echo "System"; echo "  OS: $OS_NAME"; echo "  SSH service: ${SSH_SERVICE}.service"; echo "  SSH Socket: $socket"; echo; echo "Port change"; echo "  Current port: $(get_effective_port)"; echo "  New port: $SELECTED_PORT"; echo; echo "Security checks"; echo "  Host firewall: $(firewall_label)"; echo "  SELinux: $selinux"; echo "  Cloud firewall: $CLOUD_CONFIRMATION"; echo; echo "Safeguards"; echo "  Configuration backup: automatic"; echo "  Validation: sshd -t + sshd -T"; echo "  Failure recovery: enabled"; echo "  Listener verification: enabled"; echo; echo "Execution"; echo "  Backup -> allow new port -> modify SSH -> validate/restart -> verify listener"; echo; echo "  1) Confirm and start               [Recommended]"; echo "  2) Back"; echo "  3) Return to main menu"; echo "  4) Exit"; echo; read -r -p 'Choose [default 1]: ' choice; choice="${choice:-1}"; case "$choice" in 1) FINAL_ACTION="start"; return 0;; 2) FINAL_ACTION="back"; return 1;; 3) FINAL_ACTION="menu"; return 1;; 4) FINAL_ACTION="exit"; return 1;; *) warn "Invalid choice.";; esac; done; }
+
+post_change_guide(){ local choice; while true; do step_line; echo -e "${BOLD}Step 5/5: Verify login on the new port${NC}"; step_line; ok "Server-side SSH listener confirmed on TCP $SELECTED_PORT"; echo; warn "Do not close the current SSH session."; echo "Open another terminal and test:"; echo; echo "    ssh -p $SELECTED_PORT root@SERVER_IP"; echo; echo "After testing, choose:"; echo "  1) Login on the new port succeeded  [Recommended]"; echo "  2) Cannot connect to the new port"; echo "  3) Decide later"; echo; read -r -p 'Choose: ' choice; case "$choice" in 1) ok "New-port login verification completed."; status; return 0;; 2) echo; echo "  1) Restore previous SSH config now   [Recommended]"; echo "  2) Show current status"; echo "  3) Do not restore yet"; read -r -p 'Choose [default 1]: ' choice; choice="${choice:-1}"; case "$choice" in 1) rollback; return 0;; 2) status;; 3) return 0;; esac;; 3) warn "Keep the current session open until the new port has been verified."; return 0;; *) warn "Invalid choice.";; esac; done; }
+
+WIZARD_EXIT=0
+wizard_change(){ local rc; while true; do SELECTED_PORT=""; select_port || return 0; while true; do cloud_confirmation; rc=$?; case "$rc" in 0) ;; 1) return 0;; 2) break;; 3) WIZARD_EXIT=1; return 0;; esac; if [[ "$rc" -eq 0 ]]; then preflight || { pause; return 0; }; final_confirmation || { case "$FINAL_ACTION" in back) continue;; menu) return 0;; exit) WIZARD_EXIT=1; return 0;; esac; }; if [[ "$FINAL_ACTION" == start ]]; then if change_port "$SELECTED_PORT" 1; then post_change_guide; else pause; fi; return 0; fi; fi; done; done; }
+
+show_environment(){ local p; p="$(get_effective_port)"; echo; line; echo -e "${CYAN}${BOLD} SSH Port Changer V$SCRIPT_VERSION${NC}"; echo " Safe SSH Port Configuration Wizard"; line; echo; echo "Detecting server environment..."; echo; ok "System: $OS_NAME"; if [[ "$SSH_SERVICE" != unknown ]]; then ok "SSH service: ${SSH_SERVICE}.service"; else warn "SSH service: not identified"; fi; if [[ "$SSH_SOCKET" -eq 1 ]]; then info "SSH Socket: enabled"; else ok "SSH Socket: disabled"; fi; ok "Current SSH port: $p"; if ssh_port_is_listening "$p"; then ok "SSH is listening normally"; else warn "SSH listener not confirmed"; fi; if [[ -n "${SSH_CONNECTION:-}" ]]; then ok "Current session uses TCP $(awk '{print $4}' <<< "$SSH_CONNECTION")"; fi; if [[ "$FIREWALL" == None ]]; then info "Host firewall: no active supported rules detected"; else info "Host firewall: $FIREWALL"; fi; info "Cloud firewall: user confirmation required"; if [[ -f "$STATE_FILE" ]]; then load_state; info "Last change: $OLD_PORT -> $NEW_PORT"; if [[ -f "$BACKUP_DIR/sshd_config" ]]; then info "Configuration backup: available"; else warn "Configuration backup: not found"; fi; fi; echo; }
+
+main_menu(){ local choice; while true; do show_environment; echo "Choose an action:"; echo; echo "  1) Change SSH port               [Recommended]"; echo "  2) Show SSH status"; echo "  3) Restore previous configuration"; echo "  4) Show old-port cleanup advice"; echo "  5) Exit"; echo; read -r -p 'Choose [default 1]: ' choice; choice="${choice:-1}"; case "$choice" in 1) WIZARD_EXIT=0; wizard_change; [[ "$WIZARD_EXIT" -eq 1 ]] && { echo "Exited."; return 0; };; 2) status; pause;; 3) if [[ -f "$STATE_FILE" ]]; then rollback; else warn "No previous change record was found."; fi; pause;; 4) if [[ -f "$STATE_FILE" ]]; then cleanup; else warn "No previous change record was found."; fi; pause;; 5) echo "Exited."; return 0;; *) warn "Invalid choice."; sleep 1;; esac; done; }
+
+ACTION="${1:-}"
+case "$ACTION" in --status|-s) status; exit 0;; --cleanup|-c) cleanup; exit 0;; --rollback|-r) rollback; exit 0;; --version|-v) echo "SSH Port Changer V$SCRIPT_VERSION (English)"; exit 0;; --help|-h) echo "Usage: $0 [PORT [-y]] | --status | --cleanup | --rollback | --version"; echo "Run without arguments to start the interactive safety wizard."; exit 0;; '') main_menu; exit 0;; esac
+YES=0
+for a in "$@"; do if [[ "$a" == -y || "$a" == --yes ]]; then YES=1; fi; done
+change_port "$ACTION" "$YES"
