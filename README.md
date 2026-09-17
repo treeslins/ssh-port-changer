@@ -1,72 +1,122 @@
 # SSH Port Changer
 
-一个面向 Linux 服务器的 SSH 端口安全修改脚本。重点不是单纯替换 `Port`，而是尽量降低远程修改 SSH 配置时把自己锁在服务器外面的风险。
+一个面向 Linux 服务器的 SSH 端口安全修改工具。
 
-当前版本：**V3.1**
+它不只是修改 `Port`，而是把远程修改 SSH 端口时最容易导致失联的步骤做成一个带保护的流程：环境检测、端口选择、防火墙提示、配置备份、`sshd` 校验、服务重启、监听验证以及回滚。
 
-## 功能
+当前稳定版本：**V5.1**
 
-- 自动识别 `ssh.service` / `sshd.service`
-- 兼容启用了 `ssh.socket` 的系统
+## V5.1 特点
+
+- 无参数运行进入中文交互式安全向导
+- 自动检测当前 SSH 端口、SSH 服务和 `ssh.socket`
+- 自动生成 20000-60000 范围内未占用的随机端口
+- 支持手动指定端口
+- 修改前执行 `sshd -t`
+- 修改后使用 `sshd -T` 确认实际生效端口
 - 修改前自动备份 SSH 配置
-- 修改前优先放行新的防火墙端口
-- 支持 UFW、firewalld、iptables，并安全识别自定义 nftables
+- 重启后确认新端口确实由 SSH 监听
+- 任一关键步骤失败时自动恢复 SSH 配置
+- 支持 UFW、firewalld、iptables，并保守处理自定义 nftables
 - 支持 SELinux `ssh_port_t`
-- 修改后执行 `sshd -t` 配置检查
-- 检查 sshd 实际解析出的端口
-- 重启后检查新端口是否真正监听
-- 修改失败自动恢复 SSH 配置
-- `--status` 查看当前状态
-- `--cleanup` 确认新端口正常后清理旧防火墙端口
-- `--rollback` 恢复上一次修改前的 SSH 配置
-- 检测 `netfilter-persistent` / `/etc/iptables/rules.v4`，尽可能持久化 iptables 规则
+- 对云安全组/上游防火墙进行人工确认保护
+- 支持查看状态、回滚和旧端口清理建议
+- 保留高级命令行模式，适合自动化使用
+
+## 已实机验证
+
+V5.1 已在 **Debian GNU/Linux 13 (trixie)** 上完成真实远程 SSH 闭环测试：
+
+```text
+旧端口 17247
+    ↓
+修改为 24976
+    ↓
+新终端通过 24976 实际 SSH 登录成功
+    ↓
+执行 --rollback
+    ↓
+恢复 17247
+    ↓
+17247 再次实际 SSH 登录成功
+```
+
+这项测试验证了 Debian 13 + `ssh.service` + `ssh.socket` 未启用环境下的完整主流程。其他发行版和不同 SSH/防火墙组合仍可能存在差异。
 
 ## 一键安装
 
+使用 root 用户执行：
+
 ```bash
-curl -fsSL -o /usr/local/sbin/ssh-port \
-  https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port
+curl -fsSL \
+  https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port \
+  -o /usr/local/sbin/ssh-port
+
 chmod +x /usr/local/sbin/ssh-port
 ```
 
-之后可以直接使用：
+检查版本：
+
+```bash
+ssh-port --version
+```
+
+然后直接运行：
+
+```bash
+ssh-port
+```
+
+## 推荐：交互式安全向导
+
+不带参数运行：
+
+```bash
+ssh-port
+```
+
+主菜单：
+
+```text
+1) 修改 SSH 端口        [推荐]
+2) 查看 SSH 状态
+3) 恢复上一次配置
+4) 查看旧端口清理建议
+5) 退出
+```
+
+修改端口时会依次经过：
+
+```text
+步骤 1/5  选择新的 SSH 端口
+步骤 2/5  防火墙与云端入站检查
+步骤 3/5  修改前安全检查
+步骤 4/5  最终确认
+步骤 5/5  新端口登录验证
+```
+
+在云安全组确认步骤，默认选择是“尚未确认，暂停操作”。因此一路按 Enter 不会直接越过这一项安全检查。
+
+## 高级命令行模式
+
+直接修改为指定端口：
 
 ```bash
 ssh-port 17247
 ```
 
-也可以不安装，直接下载到当前目录：
-
-```bash
-curl -fsSL -O https://raw.githubusercontent.com/treeslins/ssh-port-changer/main/ssh-port
-chmod +x ssh-port
-./ssh-port 17247
-```
-
-## 命令
-
-修改 SSH 端口：
-
-```bash
-ssh-port 17247
-```
-
-跳过修改前的确认：
+跳过脚本自身的修改确认：
 
 ```bash
 ssh-port 17247 -y
 ```
 
-查看状态：
+注意：`-y` 适合明确了解服务器网络环境的管理员。它不会替你检查或修改云厂商安全组。
+
+查看当前状态：
 
 ```bash
 ssh-port --status
-```
-
-确认新端口可以正常登录以后，清理旧端口防火墙规则：
-
-```bash
-ssh-port --cleanup
 ```
 
 恢复上一次修改前的 SSH 配置：
@@ -75,39 +125,81 @@ ssh-port --cleanup
 ssh-port --rollback
 ```
 
+查看旧端口防火墙清理建议：
+
+```bash
+ssh-port --cleanup
+```
+
+查看版本：
+
+```bash
+ssh-port --version
+```
+
 查看帮助：
 
 ```bash
 ssh-port --help
 ```
 
-## 推荐操作流程
+## 安全操作流程
 
-假设当前 SSH 端口是 `22`，准备改为 `17247`：
+假设当前 SSH 端口为 `22`，准备修改为 `17247`。
+
+首先，如果这是云服务器，请在云厂商控制台确认 TCP `17247` 已允许入站。
+
+然后运行：
+
+```bash
+ssh-port
+```
+
+或高级模式：
 
 ```bash
 ssh-port 17247
 ```
 
-脚本成功完成以后，**不要关闭当前 SSH 窗口**。
+脚本完成服务端修改后，**不要关闭当前已经登录的 SSH 窗口**。
 
-另外打开一个终端测试：
+新开一个终端实际测试：
 
 ```bash
 ssh -p 17247 root@服务器IP
 ```
 
-确认新窗口能够正常登录以后，再执行：
+只有在新终端真正登录成功以后，才建议关闭旧会话或清理旧端口的外部放行规则。
 
-```bash
-ssh-port --cleanup
+## 脚本会做什么
+
+核心执行顺序：
+
+```text
+检测环境
+  ↓
+检查目标端口
+  ↓
+备份 SSH 配置
+  ↓
+处理主机防火墙 / SELinux
+  ↓
+修改 SSH 配置
+  ↓
+sshd -t
+  ↓
+sshd -T
+  ↓
+重启 SSH
+  ↓
+验证新端口监听
 ```
 
-这样旧端口的防火墙放行规则才会被清理。
+如果修改后的配置校验、有效端口、服务重启或监听验证失败，脚本会尝试恢复刚才创建的 SSH 配置备份。
 
-## 回滚
+## 备份与回滚
 
-每次修改前，脚本会把 SSH 配置保存到：
+配置备份保存在：
 
 ```text
 /root/ssh-port-changer-backups/
@@ -119,64 +211,105 @@ ssh-port --cleanup
 /var/lib/ssh-port-changer/state
 ```
 
-如果需要恢复上一次修改前的 SSH 配置：
+回滚：
 
 ```bash
 ssh-port --rollback
 ```
 
-回滚不会自动删除防火墙规则。这样做是为了尽量避免在远程环境中因为同时修改 SSH 和防火墙而造成失联。
+为了降低远程失联风险，回滚 SSH 配置时不会自动删除之前新增的防火墙规则或 SELinux 端口映射。
 
-## 防火墙说明
+## 防火墙
 
 ### UFW
 
-脚本可以自动添加和清理端口规则。
+检测到活动 UFW 时，脚本会在修改 SSH 前尝试放行新的 TCP 端口。
 
 ### firewalld
 
-脚本会处理活动 zone；如果没有活动 zone，则使用默认 zone。
+脚本会处理活动 zone；如果没有活动 zone，则尝试使用默认 zone。
 
 ### iptables
 
-脚本会添加精确的 TCP ACCEPT 规则。如果检测到 `netfilter-persistent` 或 `/etc/iptables/rules.v4`，会尝试持久化规则；否则会提示重启后需要再次确认。
+脚本会添加精确的新端口 TCP ACCEPT 规则。如果存在 `netfilter-persistent` 或 `/etc/iptables/rules.v4`，会尝试持久化。
 
 ### nftables
 
-独立 nftables 配置自由度很高，可能存在多个 table、base chain、priority 和跳转关系。因此脚本不会猜测应该修改哪个 chain。
+独立 nftables 配置可能包含多个 table、base chain、priority 和跳转关系，因此脚本不会猜测应该修改哪个 chain。
 
-如果检测到 nftables 正在过滤流量，而目标端口没有明确的 ACCEPT 规则，脚本会停止并要求管理员先手动放行新端口。这是有意的安全设计。
+如果检测到自定义 nftables 过滤，而没有明确发现目标端口 ACCEPT 规则，脚本会停止并要求管理员先自行确认规则。
+
+### 旧端口规则
+
+`ssh-port --cleanup` 当前提供**清理建议**，不会自动删除旧端口规则。
+
+这是有意的保守设计：脚本无法可靠证明某条已有规则一定由本工具创建，自动删除可能影响管理员原有防火墙策略。
+
+## 云服务器特别注意
+
+服务器本机显示新端口监听正常，并不等于公网一定能连接。
+
+阿里云、腾讯云、AWS、Azure、Google Cloud 等平台可能在服务器外层还有安全组、云防火墙、ACL 或其他入站策略。
+
+交互式向导会要求用户确认这一点，但脚本无法从服务器内部可靠判断所有云平台的外层规则，也不会擅自修改云安全组。
 
 ## SELinux
 
-在启用了 SELinux 的系统上，脚本会尝试把新端口加入 `ssh_port_t`。
+启用 SELinux 时，脚本会尝试把新端口加入 `ssh_port_t`。
 
-如果系统缺少 `semanage`，RHEL / Rocky Linux / AlmaLinux 通常可以安装：
+如果系统缺少 `semanage`，RHEL / Rocky Linux / AlmaLinux 系列通常可安装：
 
 ```bash
 dnf install policycoreutils-python-utils
 ```
 
-## 云服务器特别注意
+## SSH Socket Activation
 
-主机上的 SSH 和防火墙配置正确，并不代表公网一定能够访问新端口。
+脚本会检测 `ssh.socket`。如果系统使用 systemd socket activation，会通过自己的 override 文件调整监听端口，并在修改配置后重新加载 systemd。
 
-阿里云、腾讯云、AWS、Azure、Google Cloud 等平台通常还有外层安全组或云防火墙。执行脚本前后，请确认云平台已经允许新的 TCP SSH 端口。
+不同发行版对 OpenSSH socket activation 的默认配置可能不同，建议首次在新发行版使用时保留云控制台/VNC/串口等带外恢复方式。
 
-脚本无法替你修改云厂商安全组。
+## 特殊 SSH 配置
 
-## 安全建议
+如果检测到 `ListenAddress` 显式携带端口，脚本会保守停止，而不是自动重写复杂监听拓扑。
 
-修改远程服务器 SSH 配置始终存在失联风险。建议保留当前已经登录的 SSH 会话，直到你从另一个终端确认新端口可以成功建立 SSH 连接。
-
-如果服务器提供 VNC、串口控制台、云厂商 Web Console 等带外管理方式，重要服务器建议确保这些恢复手段可用后再修改 SSH。
+对于大量自定义 `Include`、多端口 SSH、复杂 Match 规则、容器网络、策略路由或第三方安全软件环境，请先人工检查配置。
 
 ## 支持范围
 
-脚本主要面向使用 OpenSSH Server 的常见 Linux 发行版，包括 Debian、Ubuntu、Rocky Linux、AlmaLinux、RHEL 等。
+目标环境是使用 OpenSSH Server 的常见 Linux 发行版，例如：
 
-不同发行版、云镜像、控制面板或自行定制的防火墙/SSH 配置可能存在差异。对于复杂的 nftables、策略路由、容器网络或第三方安全软件环境，请在执行前检查现有规则。
+- Debian
+- Ubuntu
+- Rocky Linux
+- AlmaLinux
+- RHEL 及兼容发行版
+
+目前明确完成完整实机闭环验证的是 Debian 13。列入目标支持范围不代表所有发行版、版本和定制镜像都已经逐一完成实机测试。
+
+## 开发检查
+
+项目使用 GitHub Actions 对脚本执行基础静态检查：
+
+```bash
+bash -n ssh-port
+shellcheck ssh-port
+```
+
+本地也可以运行相同命令。
+
+## 安全建议
+
+远程修改 SSH 始终存在失联风险。
+
+建议：
+
+1. 保持当前 SSH 会话不关闭。
+2. 提前确认云安全组/上游防火墙允许新端口。
+3. 新开第二个终端实际登录新端口。
+4. 确认新端口登录成功后，再关闭旧会话。
+5. 重要服务器最好同时具备云控制台、VNC、串口控制台等带外恢复手段。
 
 ## License
 
-MIT
+MIT License。详见 `LICENSE`。
