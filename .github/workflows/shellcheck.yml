@@ -6,10 +6,12 @@ on:
       - main
     paths:
       - 'ssh-port'
+      - 'ssh-port-en'
       - '.github/workflows/shellcheck.yml'
   pull_request:
     paths:
       - 'ssh-port'
+      - 'ssh-port-en'
       - '.github/workflows/shellcheck.yml'
 
 permissions:
@@ -24,13 +26,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Bash syntax check
-        run: bash -n ssh-port
-
       - name: Install ShellCheck
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck
 
-      - name: Run ShellCheck
-        run: shellcheck ssh-port
+      - name: Check Chinese edition
+        run: |
+          bash -n ssh-port
+          shellcheck ssh-port
+
+      - name: Check English edition
+        run: |
+          bash -n ssh-port-en
+          shellcheck ssh-port-en
