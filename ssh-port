@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# SSH Port Changer V4.0
+# SSH Port Changer V4.1
 # https://github.com/treeslins/ssh-port-changer
 
 set -u
 set -o pipefail
 
-VERSION="4.0"
+VERSION="4.1"
 STATE_DIR="/var/lib/ssh-port-changer"
 STATE_FILE="$STATE_DIR/state"
 BACKUP_ROOT="/root/ssh-port-changer-backups"
 SSHD_CONFIG="/etc/ssh/sshd_config"
 MANAGED_BEGIN="# BEGIN SSH PORT CHANGER"
 MANAGED_END="# END SSH PORT CHANGER"
+SOCKET_OVERRIDE="/etc/systemd/system/ssh.socket.d/90-ssh-port-changer.conf"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 info(){ echo -e "${BLUE}[INFO]${NC} $*"; }
@@ -40,9 +41,14 @@ SSH_SOCKET=0
 detect_ssh_service(){
   SSH_SERVICE="unknown"; SSH_SOCKET=0
   command -v systemctl >/dev/null 2>&1 || return 0
-  if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.service'; then SSH_SERVICE=ssh
-  elif systemctl list-unit-files 2>/dev/null | grep -q '^sshd\.service'; then SSH_SERVICE=sshd; fi
-  systemctl is-active --quiet ssh.socket 2>/dev/null && SSH_SOCKET=1 || true
+  if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.service'; then
+    SSH_SERVICE=ssh
+  elif systemctl list-unit-files 2>/dev/null | grep -q '^sshd\.service'; then
+    SSH_SERVICE=sshd
+  fi
+  if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+    SSH_SOCKET=1
+  fi
 }
 detect_ssh_service
 
@@ -54,8 +60,11 @@ get_effective_port(){
 
 port_listener(){
   local p="$1"
-  if command -v ss >/dev/null 2>&1; then ss -lntp 2>/dev/null | grep -E "[:.]${p}[[:space:]]" || true
-  elif command -v netstat >/dev/null 2>&1; then netstat -lntp 2>/dev/null | grep -E "[:.]${p}[[:space:]]" || true; fi
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntp 2>/dev/null | grep -E "[:.]${p}[[:space:]]" || true
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -lntp 2>/dev/null | grep -E "[:.]${p}[[:space:]]" || true
+  fi
 }
 
 port_is_listening(){ [[ -n "$(port_listener "$1")" ]]; }
@@ -72,13 +81,13 @@ ssh_port_is_listening(){
 }
 
 check_listenaddress(){
-  local cfg
-  cfg="$("$SSHD_BIN" -T 2>/dev/null | awk '$1=="listenaddress"{print $2}')"
-  [[ -z "$cfg" ]] && return 0
-  if grep -Eq ':[0-9]+$' <<< "$cfg"; then
-    warn "检测到 ListenAddress 中可能包含显式端口："
-    printf '%s\n' "$cfg"
-    die "为避免改变自定义监听拓扑，请先移除 ListenAddress 中的显式端口后再运行。"
+  local found=""
+  found="$(grep -RhsEi '^[[:space:]]*ListenAddress[[:space:]]+(\[[^]]+\]:[0-9]+|[^[:space:]:]+:[0-9]+)' \
+    "$SSHD_CONFIG" /etc/ssh/sshd_config.d 2>/dev/null || true)"
+  if [[ -n "$found" ]]; then
+    warn "检测到 ListenAddress 显式指定端口："
+    printf '%s\n' "$found"
+    die "为避免改变自定义监听拓扑，当前版本不会自动修改这种配置。"
   fi
 }
 
@@ -149,19 +158,25 @@ backup_config(){
   BACKUP_DIR="${BACKUP_ROOT}/$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$BACKUP_DIR"
   cp -a "$SSHD_CONFIG" "$BACKUP_DIR/sshd_config"
-  [[ -d /etc/ssh/sshd_config.d ]] && cp -a /etc/ssh/sshd_config.d "$BACKUP_DIR/sshd_config.d"
-  [[ -d /etc/systemd/system/ssh.socket.d ]] && cp -a /etc/systemd/system/ssh.socket.d "$BACKUP_DIR/ssh.socket.d"
+  if [[ -f "$SOCKET_OVERRIDE" ]]; then
+    cp -a "$SOCKET_OVERRIDE" "$BACKUP_DIR/ssh-port-changer.socket.conf"
+    : > "$BACKUP_DIR/socket-override-existed"
+  fi
 }
 
 restore_backup(){
   local b="$1"
   [[ -f "$b/sshd_config" ]] || die "无效备份：$b"
   cp -a "$b/sshd_config" "$SSHD_CONFIG"
-  rm -rf /etc/ssh/sshd_config.d
-  [[ -d "$b/sshd_config.d" ]] && cp -a "$b/sshd_config.d" /etc/ssh/sshd_config.d || mkdir -p /etc/ssh/sshd_config.d
-  rm -rf /etc/systemd/system/ssh.socket.d
-  [[ -d "$b/ssh.socket.d" ]] && cp -a "$b/ssh.socket.d" /etc/systemd/system/ssh.socket.d
-  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload >/dev/null 2>&1 || true
+  if [[ -f "$b/socket-override-existed" ]]; then
+    mkdir -p "$(dirname "$SOCKET_OVERRIDE")"
+    cp -a "$b/ssh-port-changer.socket.conf" "$SOCKET_OVERRIDE"
+  else
+    rm -f "$SOCKET_OVERRIDE"
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
   "$SSHD_BIN" -t || die "恢复后的 SSH 配置校验失败，请保持当前会话并手动检查。"
   restart_ssh || die "配置已恢复，但 SSH 服务重启失败。"
 }
@@ -169,10 +184,16 @@ restore_backup(){
 restart_ssh(){
   if [[ "$SSH_SOCKET" -eq 1 ]] && command -v systemctl >/dev/null 2>&1; then
     systemctl restart ssh.socket || return 1
-    [[ "$SSH_SERVICE" != unknown ]] && systemctl try-restart "$SSH_SERVICE" >/dev/null 2>&1 || true
-  elif [[ "$SSH_SERVICE" != unknown ]] && command -v systemctl >/dev/null 2>&1; then systemctl restart "$SSH_SERVICE" || return 1
-  elif command -v service >/dev/null 2>&1; then service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || return 1
-  else return 1; fi
+    if [[ "$SSH_SERVICE" != unknown ]]; then
+      systemctl try-restart "$SSH_SERVICE" >/dev/null 2>&1 || true
+    fi
+  elif [[ "$SSH_SERVICE" != unknown ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl restart "$SSH_SERVICE" || return 1
+  elif command -v service >/dev/null 2>&1; then
+    service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || return 1
+  else
+    return 1
+  fi
 }
 
 set_global_port(){
@@ -193,8 +214,8 @@ set_global_port(){
   ' "$SSHD_CONFIG" > "$tmp" || { rm -f "$tmp"; die "生成 SSH 配置失败"; }
   cat "$tmp" > "$SSHD_CONFIG"; rm -f "$tmp"
   if [[ "$SSH_SOCKET" -eq 1 ]]; then
-    mkdir -p /etc/systemd/system/ssh.socket.d
-    printf '[Socket]\nListenStream=\nListenStream=%s\n' "$p" > /etc/systemd/system/ssh.socket.d/90-ssh-port-changer.conf
+    mkdir -p "$(dirname "$SOCKET_OVERRIDE")"
+    printf '[Socket]\nListenStream=\nListenStream=%s\n' "$p" > "$SOCKET_OVERRIDE"
     systemctl daemon-reload || die "systemd daemon-reload 失败"
   fi
 }
@@ -209,18 +230,28 @@ save_state(){
 load_state(){
   [[ -f "$STATE_FILE" ]] || die "没有找到历史修改记录"
   OLD_PORT=""; NEW_PORT=""; SAVED_FIREWALL=""; SAVED_ZONES=""; SAVED_FW_ADDED=0; SAVED_SELINUX_ADDED=0; BACKUP_DIR=""; CHANGE_TIME=""
-  while IFS='=' read -r k v; do case "$k" in
-    OLD_PORT) OLD_PORT="$v";; NEW_PORT) NEW_PORT="$v";; FIREWALL) SAVED_FIREWALL="$v";; FW_ZONES) SAVED_ZONES="$v";; FW_NEW_ADDED) SAVED_FW_ADDED="$v";; SELINUX_ADDED) SAVED_SELINUX_ADDED="$v";; BACKUP_DIR) BACKUP_DIR="$v";; CHANGE_TIME) CHANGE_TIME="$v";; esac; done < "$STATE_FILE"
+  while IFS='=' read -r k v; do
+    case "$k" in
+      OLD_PORT) OLD_PORT="$v";; NEW_PORT) NEW_PORT="$v";; FIREWALL) SAVED_FIREWALL="$v";; FW_ZONES) SAVED_ZONES="$v";;
+      FW_NEW_ADDED) SAVED_FW_ADDED="$v";; SELINUX_ADDED) SAVED_SELINUX_ADDED="$v";; BACKUP_DIR) BACKUP_DIR="$v";; CHANGE_TIME) CHANGE_TIME="$v";;
+    esac
+  done < "$STATE_FILE"
   [[ "$OLD_PORT" =~ ^[0-9]+$ && "$NEW_PORT" =~ ^[0-9]+$ && "$BACKUP_DIR" == "$BACKUP_ROOT/"* ]] || die "状态文件异常，拒绝继续。"
 }
 
 status(){
-  local p; p="$(get_effective_port)"
+  local p
+  p="$(get_effective_port)"
   echo; line; echo -e "${CYAN}SSH Port Changer V${VERSION}${NC}"; line
   echo "系统：$OS_NAME"; echo "SSH 服务：$SSH_SERVICE"; echo "SSH Socket：$([[ $SSH_SOCKET -eq 1 ]] && echo Enabled || echo Disabled)"; echo "配置端口：$p"; echo "防火墙：$FIREWALL"
-  ssh_port_is_listening "$p" && ok "已确认 SSH 在 TCP $p 监听" || warn "未能确认 sshd/systemd 在 TCP $p 监听"
+  if ssh_port_is_listening "$p"; then ok "已确认 SSH 在 TCP $p 监听"; else warn "未能确认 sshd/systemd 在 TCP $p 监听"; fi
   if [[ -n "${SSH_CONNECTION:-}" ]]; then echo "当前 SSH 会话端口：$(awk '{print $4}' <<< "$SSH_CONNECTION")"; fi
-  if [[ -f "$STATE_FILE" ]]; then load_state; echo "上次修改：$OLD_PORT -> $NEW_PORT"; echo "修改时间：$CHANGE_TIME"; echo "备份：$BACKUP_DIR"; fi
+  if [[ -f "$STATE_FILE" ]]; then
+    load_state
+    echo "上次修改：$OLD_PORT -> $NEW_PORT"; echo "修改时间：$CHANGE_TIME"; echo "备份：$BACKUP_DIR"
+    echo "修改时防火墙：$SAVED_FIREWALL"; [[ -n "$SAVED_ZONES" ]] && echo "firewalld 区域：$SAVED_ZONES"
+    echo "新增防火墙规则：$SAVED_FW_ADDED"; echo "新增 SELinux 端口映射：$SAVED_SELINUX_ADDED"
+  fi
   echo
 }
 
@@ -228,8 +259,9 @@ cleanup(){
   load_state
   ssh_port_is_listening "$NEW_PORT" || die "未确认新 SSH 端口 ${NEW_PORT} 正常监听，拒绝清理。"
   [[ "$(get_effective_port)" == "$NEW_PORT" ]] || die "当前有效 SSH 端口与状态记录不一致。"
-  local cp=""; [[ -n "${SSH_CONNECTION:-}" ]] && cp="$(awk '{print $4}' <<< "$SSH_CONNECTION")"
-  [[ "$cp" == "$OLD_PORT" ]] && warn "当前会话仍通过旧端口登录，请先测试新端口。"
+  local cp=""
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then cp="$(awk '{print $4}' <<< "$SSH_CONNECTION")"; fi
+  if [[ "$cp" == "$OLD_PORT" ]]; then warn "当前会话仍通过旧端口登录，请先测试新端口。"; fi
   warn "脚本无法证明旧端口防火墙规则由本工具创建，因此 V4 不会自动删除旧端口规则。"
   echo "请确认新端口稳定后，根据实际防火墙策略手动移除不再需要的 TCP ${OLD_PORT} 放行规则。"
 }
@@ -237,7 +269,8 @@ cleanup(){
 rollback(){
   load_state
   echo "将恢复：$BACKUP_DIR（$OLD_PORT -> $NEW_PORT）"
-  read -r -p '确认回滚 SSH 配置？[y/N]: ' a; [[ "$a" =~ ^[Yy]$ ]] || exit 0
+  read -r -p '确认回滚 SSH 配置？[y/N]: ' a
+  [[ "$a" =~ ^[Yy]$ ]] || exit 0
   restore_backup "$BACKUP_DIR"
   ok "SSH 配置已恢复。"
   warn "为避免失联，防火墙和 SELinux 新端口规则不会自动删除。"
@@ -277,5 +310,7 @@ case "$ACTION" in
   '') read -r -p '请输入新的 SSH 端口: ' ACTION;;
 esac
 YES=0
-for a in "$@"; do [[ "$a" == -y || "$a" == --yes ]] && YES=1; done
+for a in "$@"; do
+  if [[ "$a" == -y || "$a" == --yes ]]; then YES=1; fi
+done
 change_port "$ACTION" "$YES"
