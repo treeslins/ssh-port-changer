@@ -4,7 +4,7 @@
 >
 > Safe, guided SSH port changes for Linux servers.
 
-**V5.1** · Bash · OpenSSH · MIT
+**V1.0.0** · Bash · OpenSSH · MIT
 
 [English README](README_EN.md) · 中文脚本 `ssh-port` · English script `ssh-port-en`
 
@@ -18,7 +18,7 @@ SSH Port Changer 把这些步骤组合成一个带保护的流程：
 
 **检测环境 → 选择端口 → 检查防火墙 → 自动备份 → 校验配置 → 重启 SSH → 验证监听 → 新终端登录确认**
 
-### V5.1 主要功能
+### V1.0.0 主要功能
 
 - 5 步中文安全向导，随机推荐 `20000-60000` 未占用端口
 - 自动检测 `ssh.service` / `sshd.service` / `ssh.socket`
@@ -29,7 +29,7 @@ SSH Port Changer 把这些步骤组合成一个带保护的流程：
 - 云安全组必须人工确认，默认不会直接越过
 - 支持状态查看、回滚和旧端口清理建议
 
-> V5.1 已在 **Debian GNU/Linux 13 (trixie)** 完成 `17247 → 24976 → 实际新端口登录 → rollback → 17247` 的完整远程闭环测试。
+> V1.0.0 已在 **Debian GNU/Linux 13 (trixie)** 完成 `17247 → 24976 → 实际新端口登录 → rollback → 17247` 的完整远程闭环测试。
 
 ---
 

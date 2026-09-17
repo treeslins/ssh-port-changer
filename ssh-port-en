@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# SSH Port Changer V5.1 - English Edition
+# SSH Port Changer V1.0.0 - English Edition
 # https://github.com/treeslins/ssh-port-changer
 
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="5.1"
+SCRIPT_VERSION="1.0.0"
 STATE_DIR="/var/lib/ssh-port-changer"
 STATE_FILE="$STATE_DIR/state"
 BACKUP_ROOT="/root/ssh-port-changer-backups"

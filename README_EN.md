@@ -2,7 +2,7 @@
 
 > A safer, guided way to change the SSH port on Linux servers.
 
-**V5.1** · Bash · OpenSSH · MIT
+**V1.0.0** · Bash · OpenSSH · MIT
 
 [中文 README](README.md) · Chinese script `ssh-port` · English script `ssh-port-en`
 
@@ -29,7 +29,7 @@ SSH Port Changer provides a guarded workflow:
 - Requires explicit cloud/upstream firewall confirmation in wizard mode
 - Status, rollback, and old-port cleanup advice
 
-> V5.1 completed a real remote end-to-end test on **Debian GNU/Linux 13 (trixie)**: `17247 → 24976 → successful SSH login → rollback → 17247`.
+> V1.0.0 completed a real remote end-to-end test on **Debian GNU/Linux 13 (trixie)**: `17247 → 24976 → successful SSH login → rollback → 17247`.
 
 ---
 
